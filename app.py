@@ -1,4 +1,4 @@
-"""FloodSense AI — Gradio research beta. Place the two .pth files in models/."""
+"""FloodSense AI — Gradio research beta with hosted model checkpoints."""
 import os
 from pathlib import Path
 import numpy as np
@@ -7,9 +7,10 @@ import torch
 from PIL import Image
 from scipy.special import softmax
 from torchvision import models, transforms
+from huggingface_hub import hf_hub_download
 
 BASE = Path(__file__).resolve().parent
-MODELS = BASE / 'models'
+MODEL_REPO = 'etibarvazirov/FloodSense-AI-Models'
 LEVELS = [f'Level{i}' for i in range(5)]
 TEMPERATURE = 0.6826  # preliminary validation-derived parameter
 MEAN = [0.485, 0.456, 0.406]
@@ -62,8 +63,8 @@ def build_model(architecture, checkpoint):
 
 
 # Load once at server start; training is never performed here.
-model_b0 = build_model('b0', MODELS / 'floodsense_e2_advanced.pth')
-model_v2 = build_model('v2', MODELS / 'floodsense_v2_finetuned.pth')
+model_b0 = build_model('b0', Path(hf_hub_download(repo_id=MODEL_REPO, filename='floodsense_e2_advanced.pth')))
+model_v2 = build_model('v2', Path(hf_hub_download(repo_id=MODEL_REPO, filename='floodsense_v2_finetuned.pth')))
 
 
 def predict(image):
@@ -93,7 +94,7 @@ CSS = '''
 #main-title {margin-bottom: 0 !important;}
 '''
 
-with gr.Blocks(title='FloodSense AI', css=CSS, theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title='FloodSense AI') as demo:
     gr.Markdown('''
 # 🌊 FloodSense AI
 ### Vehicle Flood-Level Assessment · Research Beta
@@ -144,4 +145,4 @@ Upload a photograph of a flood-affected vehicle to estimate its **relative flood
 ''')
 
 if __name__ == '__main__':
-    demo.launch(server_name=os.environ.get('GRADIO_SERVER_NAME', '127.0.0.1'), server_port=int(os.environ.get('PORT', '7860')), share=os.environ.get('GRADIO_SHARE', 'false').lower() == 'true')
+    demo.launch(server_name=os.environ.get('GRADIO_SERVER_NAME', '0.0.0.0'), server_port=int(os.environ.get('PORT', '7860')), share=os.environ.get('GRADIO_SHARE', 'false').lower() == 'true', css=CSS, theme=gr.themes.Soft())
