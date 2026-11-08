@@ -1,5 +1,8 @@
 """FloodSense AI v3 — research dashboard. Educational prototype only."""
 import os
+import io
+import csv
+from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
 import streamlit as st
@@ -89,7 +92,7 @@ with intro2: st.markdown('<div class="smallcard"><div class="kicker">AI engine</
 with intro3: st.markdown('<div class="smallcard"><div class="kicker">Project status</div><h3>Research beta</h3><div class="muted">Not a certified flood-safety tool</div></div>', unsafe_allow_html=True)
 
 st.write('')
-tab1, tab2, tab3 = st.tabs(["🔍 Analyze image", "📘 Understanding the levels", "🧪 Research & limitations"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Analyze image", "📷 Toy-car experiment", "📘 Understanding the levels", "🧪 Research & limitations"])
 with tab1:
     left,right = st.columns([1.12,1], gap="large")
     with left:
@@ -132,13 +135,64 @@ with tab1:
     st.write('')
     st.markdown('<div class="notice"><b>Safety notice:</b> This model estimates a dataset-defined visual category, not water depth in centimeters. Never use its prediction to decide whether driving through floodwater is safe.</div>', unsafe_allow_html=True)
 with tab2:
+    st.subheader("Toy-car flood experiment · Camera Lab")
+    st.write("Test whether a model trained on photographs of real flooded vehicles transfers to a small tabletop scene. A wrong prediction is a useful experimental observation, not a failed experiment.")
+    st.warning("Use a toy car and a shallow, stable transparent container. Keep water away from phones, chargers and electrical equipment. Have an adult supervise. Never test with a real vehicle in floodwater.")
+    st.caption("Take a still photograph using the camera control below. This is not continuous live-video inference.")
+    shot = st.camera_input("Capture the toy car and waterline", key="toy_camera")
+    toy_upload = st.file_uploader("Or upload a photo taken with another camera", type=["jpg", "jpeg", "png", "webp"], key="toy_upload")
+    a, b, c = st.columns(3)
+    with a:
+        trial_id = st.text_input("Trial ID", value="T01", key="toy_trial_id")
+    with b:
+        measured_cm = st.number_input("Measured water depth (cm)", min_value=0.0, max_value=100.0, value=0.0, step=0.5, key="toy_depth")
+    with c:
+        observer_label = st.selectbox("Observed visual level (optional)", ["Not assigned", "Level0", "Level1", "Level2", "Level3", "Level4"], key="toy_observed")
+    notes = st.text_input("Notes (camera angle, lighting, car position)", key="toy_notes")
+    source = shot if shot is not None else toy_upload
+    if source is not None:
+        try:
+            toy_img = ImageOps.exif_transpose(Image.open(source)).convert("RGB")
+            st.image(toy_img, caption="Experiment photograph", width=480)
+            if st.button("Analyze experiment photo", type="primary", key="toy_analyze"):
+                with st.spinner("Analyzing experiment photo…"):
+                    toy_probs = predict(toy_img)
+                best = int(np.argmax(toy_probs))
+                st.session_state["toy_last"] = {
+                    "timestamp_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "trial_id": trial_id,
+                    "water_depth_cm": measured_cm,
+                    "observed_visual_level": observer_label,
+                    "predicted_level": f"Level{best}",
+                    "model_score": round(float(toy_probs[best]), 5),
+                    **{f"prob_level{i}": round(float(v), 5) for i, v in enumerate(toy_probs)},
+                    "notes": notes,
+                }
+                st.session_state.setdefault("toy_trials", []).append(st.session_state["toy_last"].copy())
+        except Exception as e:
+            st.error(f"Unable to analyze the image: {type(e).__name__}: {e}")
+    if "toy_last" in st.session_state:
+        result = st.session_state["toy_last"]
+        st.success(f"Predicted {result['predicted_level']} · model score {result['model_score']:.1%}")
+        st.caption("Toy-car images are out-of-distribution. This score does not validate the model's prediction or measure depth in centimeters.")
+    if st.session_state.get("toy_trials"):
+        st.markdown("**Recorded trials in this browser session**")
+        st.dataframe(st.session_state["toy_trials"], use_container_width=True)
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=list(st.session_state["toy_trials"][0].keys()))
+        writer.writeheader()
+        writer.writerows(st.session_state["toy_trials"])
+        st.download_button("Download experiment results (CSV)", output.getvalue().encode("utf-8-sig"), "floodsense_toy_trials.csv", "text/csv", use_container_width=True)
+        st.caption("Results are stored only in this browser session until downloaded. Photos are not included in the CSV; save them separately with matching trial IDs.")
+    st.markdown("**Suggested protocol:** Keep the same car, camera position and lighting. Record a dry scene, then gradually increase water in measured steps. Take at least three photographs per step. Note when the model prediction disagrees with your visual observation. Do not equate the five labels with centimeter ranges.")
+with tab3:
     st.subheader("Five ordered flood-severity categories")
     st.write("These are dataset-defined visual labels, not measured water depths. Exact centimeter ranges cannot be inferred from an image alone.")
     cols = st.columns(5)
     for i,c in enumerate(cols):
         with c: st.markdown(f'<div class="level"><strong>Level{i}</strong><p class="muted">{DESCRIPTIONS[i]}</p></div>', unsafe_allow_html=True)
     st.info("The categories describe increasing visual severity. Interpretation may vary with camera angle, vehicle type, lighting, and occlusion.")
-with tab3:
+with tab4:
     st.subheader("About the research")
     st.write("FloodSense AI investigates whether computer vision can estimate visible vehicle flood-severity categories from photographs. The prototype combines predictions from two trained neural networks and applies post-hoc score calibration.")
     a,b = st.columns(2)
