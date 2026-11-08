@@ -1,148 +1,156 @@
-"""FloodSense AI — Gradio research beta with hosted model checkpoints."""
+"""FloodSense AI v3 — research dashboard. Educational prototype only."""
 import os
 from pathlib import Path
 import numpy as np
-import gradio as gr
-import torch
-from PIL import Image
-from scipy.special import softmax
-from torchvision import models, transforms
-from huggingface_hub import hf_hub_download
+import streamlit as st
+from PIL import Image, ImageOps
 
-BASE = Path(__file__).resolve().parent
-MODEL_REPO = 'etibarvazirov/FloodSense-AI-Models'
-LEVELS = [f'Level{i}' for i in range(5)]
-TEMPERATURE = 0.6826  # preliminary validation-derived parameter
-MEAN = [0.485, 0.456, 0.406]
-STD = [0.229, 0.224, 0.225]
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+st.set_page_config(page_title="FloodSense AI | Research Dashboard", page_icon="🌊", layout="wide", initial_sidebar_state="collapsed")
 
-transform_b0 = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(MEAN, STD),
-])
-# Matches ImageClassification(crop_size=[384], resize_size=[384])
-transform_v2 = transforms.Compose([
-    transforms.Resize(384, interpolation=transforms.InterpolationMode.BILINEAR),
-    transforms.CenterCrop(384),
-    transforms.ToTensor(),
-    transforms.Normalize(MEAN, STD),
-])
+CSS = """
+<style>
+.stApp {background: #081322; color: #eaf1fb;}
+.block-container {max-width: 1190px; padding-top: 2rem; padding-bottom: 3rem;}
+.hero {padding: 28px 32px; border: 1px solid #25415b; border-radius: 20px;
+ background: linear-gradient(115deg,#112c42 0%,#10253a 55%,#0a1c2c 100%); margin-bottom: 18px;}
+.eyebrow {color:#67d9ce; font-size:12px; font-weight:750; letter-spacing:2px;}
+.hero h1 {font-size: 43px; margin: 9px 0 4px; color:#f6fbff;}
+.hero p {color:#c4d4e3; font-size:16px; margin: 0;}
+.smallcard {background:#10263a; border:1px solid #27435a; border-radius:16px; padding:17px 19px; min-height:114px;}
+.kicker {color:#a3b9c9; font-size:12px; letter-spacing:1px; text-transform:uppercase;}
+.bigresult {font-size:43px; color:#72e2d3; font-weight:800; margin:7px 0;}
+.muted {color:#adbfcd; font-size:14px;}
+.section-title {font-size:19px; font-weight:750; margin:6px 0 12px;}
+.notice {background:#13283a; border-left:3px solid #eab96b; padding:14px 18px; border-radius:7px; color:#e3eaf0;}
+.level {background:#11263a; border:1px solid #274159; padding:15px; border-radius:12px; min-height:106px;}
+.level strong {color:#8be8db;}
+footer {visibility:hidden;}
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
 
+LEVELS = [f"Level{i}" for i in range(5)]
+DESCRIPTIONS = [
+    "Lowest visible flood-severity category in the dataset.",
+    "Low flood-severity category.",
+    "Intermediate flood-severity category.",
+    "High flood-severity category.",
+    "Highest visible flood-severity category in the dataset.",
+]
+REPO = "etibarvazirov/FloodSense-AI-Models"
+TEMPERATURE = 0.6826
 
-def load_checkpoint(path):
-    if not path.is_file():
-        raise FileNotFoundError(f'Missing checkpoint: {path}. See README.md')
-    state = torch.load(path, map_location='cpu', weights_only=True)
-    if isinstance(state, dict) and 'state_dict' in state:
-        state = state['state_dict']
-    if not isinstance(state, dict):
-        raise TypeError(f'Expected state_dict in {path.name}')
-    if all(k.startswith('module.') for k in state):
-        state = {k.removeprefix('module.'): v for k, v in state.items()}
-    return state
-
-
-def build_model(architecture, checkpoint):
-    state = load_checkpoint(checkpoint)
-    if architecture == 'b0':
-        model = models.efficientnet_b0(weights=None)
-    else:
-        model = models.efficientnet_v2_s(weights=None)
-    # Derive head shape from the saved model instead of assuming dropout config.
-    final_key = 'classifier.1.weight'
-    if final_key not in state:
-        raise KeyError(f'{checkpoint.name} has no {final_key}; check architecture.')
-    n_classes, in_features = state[final_key].shape
-    if n_classes != 5:
-        raise ValueError(f'{checkpoint.name} contains {n_classes} classes, expected 5.')
-    model.classifier[1] = torch.nn.Linear(in_features, n_classes)
-    model.load_state_dict(state, strict=True)
-    return model.to(DEVICE).eval()
-
-
-# Load once at server start; training is never performed here.
-model_b0 = build_model('b0', Path(hf_hub_download(repo_id=MODEL_REPO, filename='floodsense_e2_advanced.pth')))
-model_v2 = build_model('v2', Path(hf_hub_download(repo_id=MODEL_REPO, filename='floodsense_v2_finetuned.pth')))
-
+@st.cache_resource(show_spinner="Loading the trained AI models (first visit may take a while)…")
+def load_models():
+    import torch
+    from torchvision import models, transforms
+    from huggingface_hub import hf_hub_download
+    torch.set_num_threads(min(2, os.cpu_count() or 1))
+    def make(arch, filename):
+        path = Path(hf_hub_download(repo_id=REPO, filename=filename))
+        state = torch.load(path, map_location="cpu", weights_only=True)
+        if isinstance(state, dict) and "state_dict" in state:
+            state = state["state_dict"]
+        if all(k.startswith("module.") for k in state):
+            state = {k.removeprefix("module."): v for k,v in state.items()}
+        model = models.efficientnet_b0(weights=None) if arch == "b0" else models.efficientnet_v2_s(weights=None)
+        n_classes, in_features = state["classifier.1.weight"].shape
+        if n_classes != 5:
+            raise ValueError("Expected five flood-severity classes")
+        model.classifier[1] = torch.nn.Linear(in_features, n_classes)
+        model.load_state_dict(state, strict=True)
+        return model.eval()
+    b0 = make("b0", "floodsense_e2_advanced.pth")
+    v2 = make("v2", "floodsense_v2_finetuned.pth")
+    norm = transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    t0 = transforms.Compose([transforms.Resize((224,224)), transforms.ToTensor(), norm])
+    t1 = transforms.Compose([transforms.Resize(384, interpolation=transforms.InterpolationMode.BILINEAR), transforms.CenterCrop(384), transforms.ToTensor(), norm])
+    return b0, v2, t0, t1
 
 def predict(image):
-    if image is None:
-        return {}, 'Please upload a photograph of a flood-affected vehicle.'
-    image = image.convert('RGB')
+    import torch
+    b0, v2, t0, t1 = load_models()
     with torch.inference_mode():
-        p0 = torch.softmax(model_b0(transform_b0(image).unsqueeze(0).to(DEVICE)), dim=1)[0].cpu().numpy()
-        p1 = torch.softmax(model_v2(transform_v2(image).unsqueeze(0).to(DEVICE)), dim=1)[0].cpu().numpy()
-    ensemble = 0.7 * p0 + 0.3 * p1
-    calibrated = softmax(np.log(np.clip(ensemble, 1e-12, 1)) / TEMPERATURE)
-    label = int(np.argmax(calibrated))
-    return (
-        {LEVELS[i]: float(calibrated[i]) for i in range(5)},
-        f'Predicted class: Level{label}\n'
-        f'Calibrated model score: {calibrated[label]:.1%}\n\n'
-        'This is a research prototype, not a water-depth measurement. '
-        'Do not use it to decide whether a road is safe to drive through.'
-    )
+        p0 = torch.softmax(b0(t0(image).unsqueeze(0)), dim=1)[0].numpy()
+        p1 = torch.softmax(v2(t1(image).unsqueeze(0)), dim=1)[0].numpy()
+    raw = np.clip(.7*p0 + .3*p1, 1e-12, 1)
+    logits = np.log(raw) / TEMPERATURE
+    logits -= logits.max()
+    calibrated = np.exp(logits)
+    calibrated /= calibrated.sum()
+    return calibrated
 
-CSS = '''
-.gradio-container {max-width: 1120px !important; margin: auto !important;}
-#photo-input {max-height: 380px !important;}
-#photo-input .image-container {height: 340px !important; max-height: 340px !important;}
-#photo-input img {object-fit: contain !important; width: 100% !important; height: 100% !important;}
-#photo-input canvas {object-fit: contain !important;}
-#main-title {margin-bottom: 0 !important;}
-'''
+st.markdown('''<div class="hero"><div class="eyebrow">COMPUTER VISION · RESEARCH PROTOTYPE</div>
+<h1>🌊 FloodSense AI</h1><p>Visual assessment of vehicle flood severity, powered by ensemble deep learning.</p></div>''', unsafe_allow_html=True)
 
-with gr.Blocks(title='FloodSense AI') as demo:
-    gr.Markdown('''
-# 🌊 FloodSense AI
-### Vehicle Flood-Level Assessment · Research Beta
+intro1,intro2,intro3 = st.columns(3)
+with intro1: st.markdown('<div class="smallcard"><div class="kicker">Assessment</div><h3>5 ordered levels</h3><div class="muted">From Level0 to Level4</div></div>', unsafe_allow_html=True)
+with intro2: st.markdown('<div class="smallcard"><div class="kicker">AI engine</div><h3>Dual-model ensemble</h3><div class="muted">EfficientNet-B0 + EfficientNetV2-S</div></div>', unsafe_allow_html=True)
+with intro3: st.markdown('<div class="smallcard"><div class="kicker">Project status</div><h3>Research beta</h3><div class="muted">Not a certified flood-safety tool</div></div>', unsafe_allow_html=True)
 
-Upload a photograph of a flood-affected vehicle to estimate its **relative flood-severity class** using two image-classification networks. The app combines EfficientNet-B0 (70%) and EfficientNetV2-S (30%) and applies preliminary confidence calibration.
-''', elem_id='main-title')
-    with gr.Row(equal_height=False):
-        with gr.Column(scale=1, min_width=320):
-            photo = gr.Image(label='Vehicle photograph', type='pil', sources=['upload', 'webcam'], height=340, elem_id='photo-input')
-            run = gr.Button('Analyze Flood Level', variant='primary')
-            clear = gr.ClearButton(value='Clear', components=[photo])
-        with gr.Column(scale=1, min_width=320):
-            probabilities = gr.Label(label='Estimated Class Probabilities', num_top_classes=5)
-            assessment = gr.Textbox(label='AI Assessment', lines=5, interactive=False)
-    run.click(predict, inputs=[photo], outputs=[probabilities, assessment])
-    clear.click(lambda: ({}, ''), outputs=[probabilities, assessment])
-    gr.Markdown('''
----
-### Understanding the five levels
+st.write('')
+tab1, tab2, tab3 = st.tabs(["🔍 Analyze image", "📘 Understanding the levels", "🧪 Research & limitations"])
+with tab1:
+    left,right = st.columns([1.12,1], gap="large")
+    with left:
+        st.markdown('<div class="section-title">Upload a vehicle photograph</div>', unsafe_allow_html=True)
+        upload = st.file_uploader("Choose a JPG, PNG, or WEBP image", type=["jpg","jpeg","png","webp"], label_visibility="collapsed")
+        if upload:
+            try:
+                img = ImageOps.exif_transpose(Image.open(upload)).convert("RGB")
+                st.image(img, caption="Original aspect ratio preserved", use_container_width=True)
+            except Exception:
+                st.error("The selected file could not be opened as an image.")
+                img = None
+        else:
+            img = None
+            st.info("Upload a flood-affected vehicle image to begin. No example photo is needed.")
+        analyze = st.button("Analyze flood severity", type="primary", use_container_width=True, disabled=img is None)
+    with right:
+        st.markdown('<div class="section-title">AI assessment</div>', unsafe_allow_html=True)
+        if analyze and img is not None:
+            with st.spinner("Analyzing image…"):
+                try:
+                    st.session_state["prediction"] = predict(img)
+                    st.session_state["image_name"] = upload.name
+                except Exception as e:
+                    st.error("Unable to load or run the models. Check deployment logs and available memory.")
+                    st.caption(f"Technical detail: {type(e).__name__}: {e}")
+        if "prediction" in st.session_state:
+            probs = st.session_state["prediction"]
+            best = int(np.argmax(probs))
+            st.markdown(f'<div class="smallcard"><div class="kicker">Predicted flood-severity category</div><div class="bigresult">Level{best}</div><div class="muted">Calibrated model score: <b>{probs[best]:.1%}</b></div></div>', unsafe_allow_html=True)
+            st.write('')
+            st.markdown("**Probability distribution**")
+            for i, val in enumerate(probs):
+                c1,c2 = st.columns([1,5])
+                with c1: st.caption(f"Level{i}")
+                with c2: st.progress(float(val), text=f"{val:.1%}")
+            st.caption("Model scores describe relative confidence, not a guaranteed probability of correctness.")
+        else:
+            st.markdown('<div class="smallcard"><div class="kicker">Awaiting image</div><h3>Your analysis will appear here</h3><div class="muted">Upload a photo and select Analyze flood severity.</div></div>', unsafe_allow_html=True)
+    st.write('')
+    st.markdown('<div class="notice"><b>Safety notice:</b> This model estimates a dataset-defined visual category, not water depth in centimeters. Never use its prediction to decide whether driving through floodwater is safe.</div>', unsafe_allow_html=True)
+with tab2:
+    st.subheader("Five ordered flood-severity categories")
+    st.write("These are dataset-defined visual labels, not measured water depths. Exact centimeter ranges cannot be inferred from an image alone.")
+    cols = st.columns(5)
+    for i,c in enumerate(cols):
+        with c: st.markdown(f'<div class="level"><strong>Level{i}</strong><p class="muted">{DESCRIPTIONS[i]}</p></div>', unsafe_allow_html=True)
+    st.info("The categories describe increasing visual severity. Interpretation may vary with camera angle, vehicle type, lighting, and occlusion.")
+with tab3:
+    st.subheader("About the research")
+    st.write("FloodSense AI investigates whether computer vision can estimate visible vehicle flood-severity categories from photographs. The prototype combines predictions from two trained neural networks and applies post-hoc score calibration.")
+    a,b = st.columns(2)
+    with a:
+        st.markdown("**Current approach**")
+        st.write("EfficientNet-B0 (70%) + EfficientNetV2-S (30%). Temperature scaling (T = 0.6826) was fitted using validation data.")
+    with b:
+        st.markdown("**Evaluation note**")
+        st.write("The ensemble achieved approximately 73.5% accuracy on the development validation split. This is not an independent final-test result and does not establish real-world reliability.")
+    st.markdown("**Known limitations**")
+    st.write("Unusual camera angles, reflections, different vehicles, or images unlike the training data can produce confident but incorrect predictions. The model is not intended for emergency response or road-safety decisions.")
+    st.caption("Explainability / Grad-CAM integration is planned; it is not yet included in this deployed version.")
 
-| Level | Interpretation |
-|---|---|
-| **Level0** | Lowest category in the dataset's ordered label system |
-| **Level1** | Relatively low category |
-| **Level2** | Intermediate category |
-| **Level3** | Relatively high category |
-| **Level4** | Highest category |
-
-**Important:** These are *relative dataset categories*, **not verified water-depth intervals in centimeters**. Exact physical definitions should be added only after confirming the original STURM-FloodDepth annotation guidelines.
-
-### How it works
-
-1. Upload a photograph containing a vehicle and floodwater.
-2. Two pretrained, fine-tuned image models produce five-class probability distributions.
-3. The ensemble combines them and applies temperature scaling (**T = 0.6826**).
-4. Review the predicted class and all five probabilities.
-
-### Research results and limitations
-
-- **Ensemble validation accuracy:** 73.49% on 381 group-separated validation images (the ensemble weight was selected on this same set).
-- **Validation macro-F1:** 0.7340.
-- **Preliminary calibration:** on a 191-image evaluation subset, ECE decreased from 0.1142 to 0.0687. This is **not a fully independent evaluation**, since ensemble weights were previously chosen using the full validation set.
-- A confident prediction can still be wrong. Results on new internet photographs are not validated ground truth.
-- Scenes with multiple vehicles, occlusion, reflections, unusual camera angles, and unfamiliar conditions can cause errors.
-- **Not suitable for emergency response, vehicle operation, or driving safety decisions.**
-
-*Future work: vehicle-focused explanations, physically grounded waterline checks, and independent test-set evaluation.*
-''')
-
-if __name__ == '__main__':
-    demo.launch(server_name=os.environ.get('GRADIO_SERVER_NAME', '0.0.0.0'), server_port=int(os.environ.get('PORT', '7860')), share=os.environ.get('GRADIO_SHARE', 'false').lower() == 'true', css=CSS, theme=gr.themes.Soft())
+st.divider()
+st.caption("FloodSense AI · Educational research prototype · No guarantee of safety or physical water-depth measurement")
